@@ -13,7 +13,7 @@
 // This struct will be passed to each thread
 typedef struct {
     FILE *file;
-    int  outfile;
+    char outfile[50];
     long start;
     long end;
 } ThreadData;
@@ -21,20 +21,73 @@ typedef struct {
 void *encrypt_chunk(void *arg) {
     ThreadData *data = (ThreadData *)arg;
 
-    // Your existing encryption code here, modified to read from data->file
-    // starting at data->start and ending at data->end, and write to data->outfile
-
-
-
-
-
-      FILE *outfile = fopen("encrypted_file"+"", "wb");
+    // Open the output file
+    FILE *outfile = fopen(data->outfile, "wb");
     if (!outfile) {
         perror("Unable to open output file");
-        return 1;
+        return NULL;
     }
+
+    // Initialize the encryption context
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        printf("Unable to create cipher context\n");
+        return NULL;
+    }
+
+    // Initialize AES-GCM with 128-bit key
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1) {
+        printf("Unable to initialize cipher\n");
+        return NULL;
+    }
+
+    // Set the key and IV
+    unsigned char key[AES_GCM_KEY_SIZE] = "ThisIsASampleKey"; // key
+    unsigned char iv[AES_GCM_IV_SIZE];
+    if (RAND_bytes(iv, sizeof(iv)) != 1) {
+        printf("Unable to generate IV\n");
+        return NULL;
+    }
+    if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv) != 1) {
+        printf("Unable to set key/IV\n");
+        return NULL;
+    }
+
+    // Write the IV to the output file
+    fwrite(iv, 1, AES_GCM_IV_SIZE, outfile);
+
+    // Encrypt the file
+    unsigned char buffer[1024], outbuf[1024 + EVP_MAX_BLOCK_LENGTH];
+    int outlen;
+    fseek(data->file, data->start, SEEK_SET);
+    long remaining = data->end - data->start;
+    while (remaining > 0) {
+        size_t count = fread(buffer, 1, sizeof(buffer), data->file);
+        if (count == 0) break;
+        if (EVP_EncryptUpdate(ctx, outbuf, &outlen, buffer, count) != 1) {
+            printf("Encryption failed\n");
+            return NULL;
+        }
+        fwrite(outbuf, 1, outlen, outfile);
+        remaining -= count;
+    }
+
+    // Finalize encryption and get the tag
+    unsigned char tag[AES_GCM_TAG_SIZE];
+    if (EVP_EncryptFinal_ex(ctx, outbuf, &outlen) != 1 || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, AES_GCM_TAG_SIZE, tag) != 1) {
+        printf("Unable to finalize encryption or get tag\n");
+        return NULL;
+    }
+    fwrite(outbuf, 1, outlen, outfile);
+    fwrite(tag, 1, AES_GCM_TAG_SIZE, outfile);
+
+    // Clean up
+    EVP_CIPHER_CTX_free(ctx);
+    fclose(outfile);
+
     return NULL;
 }
+
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
@@ -54,20 +107,13 @@ int main(int argc, char *argv[]) {
     long filesize = ftell(file);
     fseek(file, 0, SEEK_SET);
 
-    // Open the output file
-    FILE *outfile = fopen("encrypted_file", "wb");
-    if (!outfile) {
-        perror("Unable to open output file");
-        return 1;
-    }
-
     // Create the threads
     pthread_t threads[NUM_THREADS];
     ThreadData thread_data[NUM_THREADS];
     for (int i = 0; i < NUM_THREADS; i++) {
         thread_data[i].file = file;
-        thread_data[i].outfile = i;
-        thread_data[i].start = i * filesize / NUM_THREADS;
+        sprintf(thread_data[i].outfile, "encrypted_file_%d", i);
+        thread_data[i].start = i * (filesize / NUM_THREADS);
         thread_data[i].end = (i + 1) * filesize / NUM_THREADS;
         pthread_create(&threads[i], NULL, encrypt_chunk, &thread_data[i]);
     }
@@ -79,7 +125,6 @@ int main(int argc, char *argv[]) {
 
     // Clean up
     fclose(file);
-    fclose(outfile);
 
     return 0;
 }
